@@ -15,7 +15,7 @@ MEMBERSHIP_MONTHLY_COST = 79.99
 PAY_PER_WASH = 40.00
 MEMBERSHIP_START_DATE = date(2025, 9, 25)
 DEFAULT_WORKSHEET_NAME = "car_washes"
-HEADER_ROW = ["id", "date", "price"]
+HEADER_ROW = ["date", "price"]
 SERVICE_ACCOUNT_ENV = "GOOGLE_SERVICE_ACCOUNT_JSON"
 SHEET_ID_ENV = "GOOGLE_SHEET_ID"
 
@@ -61,9 +61,10 @@ def _worksheet_name() -> str:
 
 
 def _ensure_header(worksheet: gspread.Worksheet) -> None:
-    header = worksheet.row_values(1)
-    if header[:3] != HEADER_ROW:
-        worksheet.update("A1:C1", [HEADER_ROW])
+    header = [cell.lower() for cell in worksheet.row_values(1)]
+    if header[: len(HEADER_ROW)] != HEADER_ROW:
+        # Normalize header to expected columns without IDs.
+        worksheet.update("A1:B1", [HEADER_ROW])
 
 
 def _worksheet() -> gspread.Worksheet:
@@ -106,11 +107,12 @@ def load_washes() -> pd.DataFrame:
     """Fetch all car wash entries from Google Sheets."""
     worksheet = _worksheet()
     records = worksheet.get_all_records()
-    if not records:
+    df = pd.DataFrame(records)
+    if df.empty:
         return pd.DataFrame(columns=HEADER_ROW)
 
-    df = pd.DataFrame(records)
-    df["id"] = df["id"].astype(int)
+    df = df.rename(columns=str.lower)
+    df = df[[col for col in HEADER_ROW if col in df.columns]]
     df["price"] = df["price"].astype(float)
     df["date"] = pd.to_datetime(df["date"]).dt.date
     return df.sort_values("date")
@@ -133,9 +135,8 @@ def append_wash(day: date, df: pd.DataFrame) -> bool:
         return False
 
     worksheet = _worksheet()
-    next_id = int(df["id"].max()) + 1 if not df.empty else 1
     worksheet.append_row(
-        [next_id, day.isoformat(), f"{PAY_PER_WASH:.2f}"],
+        [day.isoformat(), f"{PAY_PER_WASH:.2f}"],
         value_input_option="USER_ENTERED",
     )
     load_washes.clear()

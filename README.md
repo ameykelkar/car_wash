@@ -51,7 +51,7 @@ The app reads and writes directly to Google Sheets so data survives Streamlit re
    ```
 4. Alternatively, set the environment variables `GOOGLE_SERVICE_ACCOUNT_JSON` (raw JSON string) and `GOOGLE_SHEET_ID`.
 
-The first time the app runs it will create (or reuse) a worksheet named `car_washes` with columns `id`, `date`, and `price`. You can manually seed the spreadsheet with existing wash history via Google Sheets UI if desired.
+The first time the app runs it will create (or reuse) a worksheet named `car_washes` with columns `date` and `price`. You can manually seed the spreadsheet with existing wash history via Google Sheets UI if desired.
 
 ## Configuration
 - Membership start date (used to determine how many $79.99 billing cycles have been charged) is defined in `streamlit_app.py` via the `MEMBERSHIP_START_DATE` constant. Update it if the subscription begins on a different day.
