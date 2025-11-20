@@ -1,19 +1,23 @@
 from __future__ import annotations
 
-import csv
+import json
+import os
 from dataclasses import dataclass
 from datetime import date, timedelta
-from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
+import gspread
 import pandas as pd
 import streamlit as st
 
 
-DATA_PATH = Path(__file__).parent / "data" / "car_washes.csv"
 MEMBERSHIP_MONTHLY_COST = 79.99
 PAY_PER_WASH = 40.00
 MEMBERSHIP_START_DATE = date(2025, 9, 25)
+DEFAULT_WORKSHEET_NAME = "car_washes"
+HEADER_ROW = ["id", "date", "price"]
+SERVICE_ACCOUNT_ENV = "GOOGLE_SERVICE_ACCOUNT_JSON"
+SHEET_ID_ENV = "GOOGLE_SHEET_ID"
 
 
 @dataclass
@@ -33,19 +37,79 @@ class OverallStats(CycleStats):
     cycles_recorded: int
 
 
-def ensure_storage() -> None:
-    """Make sure the CSV data store exists with the correct headers."""
-    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not DATA_PATH.exists():
-        DATA_PATH.write_text("id,date,price\n", encoding="utf-8")
+class SheetConfigError(RuntimeError):
+    """Raised when Google Sheets is not configured correctly."""
 
 
+def _service_account_info() -> Optional[Dict[str, Any]]:
+    if "gcp_service_account" in st.secrets:
+        secret_dict = st.secrets["gcp_service_account"]
+        return {key: secret_dict[key] for key in secret_dict}
+
+    env_json = os.getenv(SERVICE_ACCOUNT_ENV)
+    if env_json:
+        return json.loads(env_json)
+    return None
+
+
+def _sheet_id() -> Optional[str]:
+    return st.secrets.get("google_sheet_id") or os.getenv(SHEET_ID_ENV)
+
+
+def _worksheet_name() -> str:
+    return st.secrets.get("google_worksheet_name", DEFAULT_WORKSHEET_NAME)
+
+
+def _ensure_header(worksheet: gspread.Worksheet) -> None:
+    header = worksheet.row_values(1)
+    if header[:3] != HEADER_ROW:
+        worksheet.update("A1:C1", [HEADER_ROW])
+
+
+def _worksheet() -> gspread.Worksheet:
+    creds = _service_account_info()
+    if not creds:
+        raise SheetConfigError(
+            "Missing Google service account credentials. "
+            "Add a `gcp_service_account` block to `.streamlit/secrets.toml` "
+            "or set the GOOGLE_SERVICE_ACCOUNT_JSON environment variable."
+        )
+
+    sheet_id = _sheet_id()
+    if not sheet_id:
+        raise SheetConfigError(
+            "Missing Google Sheet ID. Provide `google_sheet_id` in secrets "
+            "or set the GOOGLE_SHEET_ID environment variable."
+        )
+
+    worksheet_name = _worksheet_name()
+    try:
+        client = gspread.service_account_from_dict(creds)
+        spreadsheet = client.open_by_key(sheet_id)
+        try:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+        except gspread.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=100, cols=3)
+        _ensure_header(worksheet)
+        return worksheet
+    except gspread.SpreadsheetNotFound as exc:
+        raise SheetConfigError(
+            "Unable to open the Google Sheet. Confirm the Sheet ID is correct "
+            "and that it is shared with the service account email."
+        ) from exc
+    except Exception as exc:
+        raise SheetConfigError(f"Google Sheets error: {exc}") from exc
+
+
+@st.cache_data(ttl=60)
 def load_washes() -> pd.DataFrame:
-    """Return all car wash entries sorted by date."""
-    ensure_storage()
-    df = pd.read_csv(DATA_PATH)
-    if df.empty:
-        return pd.DataFrame(columns=["id", "date", "price"])
+    """Fetch all car wash entries from Google Sheets."""
+    worksheet = _worksheet()
+    records = worksheet.get_all_records()
+    if not records:
+        return pd.DataFrame(columns=HEADER_ROW)
+
+    df = pd.DataFrame(records)
     df["id"] = df["id"].astype(int)
     df["price"] = df["price"].astype(float)
     df["date"] = pd.to_datetime(df["date"]).dt.date
@@ -68,10 +132,13 @@ def append_wash(day: date, df: pd.DataFrame) -> bool:
     if has_entry_for(day, df):
         return False
 
+    worksheet = _worksheet()
     next_id = int(df["id"].max()) + 1 if not df.empty else 1
-    with DATA_PATH.open("a", newline="", encoding="utf-8") as csv_file:
-        writer = csv.writer(csv_file)
-        writer.writerow([next_id, day.isoformat(), f"{PAY_PER_WASH:.2f}"])
+    worksheet.append_row(
+        [next_id, day.isoformat(), f"{PAY_PER_WASH:.2f}"],
+        value_input_option="USER_ENTERED",
+    )
+    load_washes.clear()
     return True
 
 
@@ -181,14 +248,22 @@ def render_membership_summary(df: pd.DataFrame, today: date) -> None:
     col3.metric("Total savings so far", format_currency(totals.savings))
 
 
-def render_savings_filter(df: pd.DataFrame, today: date) -> None:
-    """Render a selector to inspect savings per billing cycle."""
+def filter_cycle(df: pd.DataFrame, cycle_start: date | None) -> pd.DataFrame:
+    if cycle_start is None:
+        return df
+    cycle_end = add_months(cycle_start, 1)
+    mask = (df["date"] >= cycle_start) & (df["date"] < cycle_end)
+    return df.loc[mask].copy()
+
+
+def render_savings_filter(df: pd.DataFrame, today: date) -> pd.DataFrame:
+    """Render a selector to inspect savings per billing cycle and return filtered rows."""
     summaries = compute_cycle_stats(df)
     st.subheader("Savings Breakdown")
 
     if not summaries:
         st.info("Log at least one car wash to unlock month-by-month savings.")
-        return
+        return df
 
     options = ["All recorded cycles"]
     option_map: Dict[str, date] = {}
@@ -205,6 +280,7 @@ def render_savings_filter(df: pd.DataFrame, today: date) -> None:
         a_la_carte = stats.a_la_carte_cost
         savings = stats.savings
         context = f"{stats.cycles_elapsed} billing cycle(s)"
+        filtered_df = df
     else:
         start = option_map[selection]
         stats = summaries[start]
@@ -213,12 +289,15 @@ def render_savings_filter(df: pd.DataFrame, today: date) -> None:
         a_la_carte = stats.a_la_carte_cost
         savings = stats.savings
         context = selection
+        filtered_df = filter_cycle(df, start)
 
     metrics = st.columns(4)
     metrics[0].metric("Washes logged", wash_count, context)
     metrics[1].metric("Pay-per-wash cost", format_currency(a_la_carte))
     metrics[2].metric("Membership cost", format_currency(membership_cost))
     metrics[3].metric("Savings", format_currency(savings))
+
+    return filtered_df
 
 
 def render_history(df: pd.DataFrame) -> None:
@@ -251,25 +330,58 @@ def main() -> None:
         "see the savings compared to paying \\$40 per visit."
     )
 
-    df = load_washes()
+    try:
+        df = load_washes()
+    except SheetConfigError as exc:
+        st.error(exc)
+        st.info(
+            "Configure the Google Sheets backend by following the README instructions "
+            "for service accounts and `st.secrets`."
+        )
+        st.stop()
+
     today = date.today()
 
     render_membership_summary(df, today)
 
+    pin_secret = st.secrets.get("log_pin")
     button_col = st.columns([1, 1, 1])[1]
     already_logged = has_entry_for(today, df)
     button_label = "Log today's car wash" if not already_logged else "Already logged today"
 
     with button_col:
-        if st.button(button_label, use_container_width=True, disabled=already_logged):
-            if append_wash(today, df):
-                st.toast("Logged today's car wash! ✅")
-                st.rerun()
-            else:
-                st.warning("Today's wash is already recorded.")
+        pin_input = st.text_input(
+            "Enter PIN to log today's wash",
+            type="password",
+            max_chars=4,
+            key="log_pin_input",
+            disabled=already_logged or pin_secret is None,
+            help="Enter the 4-digit PIN configured in Streamlit secrets.",
+        )
+        if pin_input and not pin_input.isdigit():
+            st.warning("PIN must contain digits only.")
+        if st.button(
+            button_label,
+            use_container_width=True,
+            disabled=already_logged or pin_secret is None,
+        ):
+            try:
+                if pin_secret is None:
+                    st.error("Logging PIN not configured. Set `log_pin` in secrets.")
+                elif not pin_input or not pin_input.isdigit():
+                    st.error("Enter a numeric PIN to continue.")
+                elif pin_input != str(pin_secret):
+                    st.error("Incorrect PIN. Try again.")
+                elif append_wash(today, df):
+                    st.toast("Logged today's car wash! ✅")
+                    st.rerun()
+                else:
+                    st.warning("Today's wash is already recorded.")
+            except SheetConfigError as exc:
+                st.error(exc)
 
-    render_savings_filter(df, today)
-    render_history(df)
+    filtered_df = render_savings_filter(df, today)
+    render_history(filtered_df)
 
 
 if __name__ == "__main__":
