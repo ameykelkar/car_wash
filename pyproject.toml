@@ -1,0 +1,18 @@
+[project]
+name = "car-wash"
+version = "0.1.0"
+description = "Streamlit-based tracker for logging car washes and membership savings."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "streamlit>=1.40,<2",
+    "pandas>=2.2,<3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false
+
