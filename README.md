@@ -22,6 +22,12 @@ Streamlit-powered dashboard for logging every wash from a $79.99/month membershi
    uv run streamlit run streamlit_app.py
    ```
 
+## Deploying to Streamlit Community Cloud
+1. Push the repo (including `requirements.txt` and `streamlit_app.py`) to GitHub.
+2. Visit https://share.streamlit.io/, click **New app**, and select this repository and branch.
+3. Set the entry point to `streamlit_app.py`. No extra secrets are required because storage is committed CSV files.
+4. The platform will install from `requirements.txt`; subsequent pushes to the same branch redeploy automatically.
+
 ## Data storage
 - All washes are persisted inside `data/car_washes.csv`, which is versioned with the project.
 - Each entry stores an auto-incremented ID, the wash date, and the fixed $40 price used for savings comparisons.
